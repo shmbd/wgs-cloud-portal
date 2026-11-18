@@ -1,0 +1,57 @@
+name: BioForge WGS Cloud Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "WGS Portal Job ID"
+        required: true
+        type: string
+      portal_url:
+        description: "Base URL of the Netlify WGS Portal"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  assemble-and-annotate:
+    name: Assemble & Annotate (${{ inputs.job_id }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+
+    steps:
+      - name: Checkout Pipeline Repository
+        uses: actions/checkout@v4
+
+      - name: Free Extra Runner Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          df -h
+
+      - name: Setup Micromamba & Bioinformatics Environments
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          micromamba-version: "2.0.5-0"
+          cache-downloads: true
+          init-shell: bash
+
+      - name: Create Assembly & Annotation Conda Environments
+        shell: bash -el {0}
+        run: |
+          micromamba create -y -n wgs_asm --override-channels -c conda-forge -c bioconda \
+            python=3.11 fastp spades quast
+          micromamba create -y -n wgs_ann --override-channels -c conda-forge -c bioconda \
+            prokka tbl2asn-forever abricate
+          micromamba run -n wgs_ann abricate --setupdb
+
+      - name: Execute Automated WGS Pipeline
+        shell: bash -el {0}
+        env:
+          JOB_ID: ${{ inputs.job_id }}
+          PORTAL_URL: ${{ inputs.portal_url }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 scripts/run_cloud_pipeline.py

@@ -1,0 +1,31 @@
+CREATE TABLE IF NOT EXISTS wgs_jobs (
+  id TEXT PRIMARY KEY,
+  sample_name TEXT NOT NULL,
+  genus TEXT NOT NULL DEFAULT 'Streptomyces',
+  species TEXT NOT NULL DEFAULT 'sp.',
+  strain TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'uploading',
+  current_stage TEXT NOT NULL DEFAULT 'Waiting for FASTQ upload',
+  progress INTEGER NOT NULL DEFAULT 0,
+  r1_filename TEXT NOT NULL,
+  r2_filename TEXT NOT NULL,
+  r1_size_bytes BIGINT NOT NULL DEFAULT 0,
+  r2_size_bytes BIGINT NOT NULL DEFAULT 0,
+  r1_key TEXT NOT NULL,
+  r2_key TEXT NOT NULL,
+  results_zip_key TEXT,
+  contigs_key TEXT,
+  gbk_key TEXT,
+  quast_html_key TEXT,
+  raw_reads_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+  pipeline_options JSONB NOT NULL DEFAULT '{}'::jsonb,
+  metrics JSONB NOT NULL DEFAULT '{}'::jsonb,
+  stage_logs JSONB NOT NULL DEFAULT '[]'::jsonb,
+  error_message TEXT,
+  gh_run_url TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_wgs_jobs_created_at ON wgs_jobs (created_at DESC);

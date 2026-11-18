@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.netlify/
+.env
+.env.*
+!.env.example
+*.log
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+.DS_Store
+Thumbs.db
