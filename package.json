@@ -1,6 +1,6 @@
 {
   "name": "bioforge-wgs-cloud-portal",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "Cloud-hosted Bacterial & Streptomyces WGS Assembly, QC, and Functional Annotation Portal (Netlify + Cloudflare R2 + GitHub Actions)",
@@ -11,12 +11,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@netlify/blobs": "^8.1.0",
-    "@netlify/database": "^0.2.0",
-    "@netlify/functions": "^3.1.0"
+    "@netlify/blobs": "^11.1.3",
+    "@netlify/database": "^2.0.3",
+    "@netlify/functions": "^6.1.1"
   },
   "devDependencies": {
-    "@netlify/vite-plugin": "^2.1.0",
+    "@netlify/vite-plugin": "^3.0.1",
     "typescript": "^5.7.2",
     "vite": "^6.0.5"
   }
