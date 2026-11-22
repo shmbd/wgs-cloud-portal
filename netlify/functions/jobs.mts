@@ -96,6 +96,59 @@ export default async (req: Request, _context: Context) => {
         expiresInSeconds: 14400,
       });
 
+      // Server-side R2 write + CORS preflight verification so exact R2 errors are surfaced clearly
+      const probeKey = `jobs/${jobId}/.probe`;
+      const probePutUrl = await createR2PresignedUrl({
+        method: "PUT",
+        objectKey: probeKey,
+        expiresInSeconds: 300,
+      });
+      const probeResp = await fetch(probePutUrl, {
+        method: "PUT",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: "ok",
+      });
+      if (!probeResp.ok) {
+        const xml = await probeResp.text();
+        const codeMatch = xml.match(/<Code>([^<]+)<\/Code>/);
+        const msgMatch = xml.match(/<Message>([^<]+)<\/Message>/);
+        const r2Code = codeMatch ? codeMatch[1] : `HTTP ${probeResp.status}`;
+        const r2Msg = msgMatch ? msgMatch[1] : xml.slice(0, 200);
+        return Response.json(
+          {
+            error: `Cloudflare R2 rejected write (${r2Code}): ${r2Msg}. Check R2_BUCKET_NAME, R2_ACCOUNT_ID, and API token permissions.`,
+          },
+          { status: 502 }
+        );
+      }
+      // Clean up probe object asynchronously
+      createR2PresignedUrl({
+        method: "DELETE",
+        objectKey: probeKey,
+        expiresInSeconds: 300,
+      })
+        .then((delUrl) => fetch(delUrl, { method: "DELETE" }))
+        .catch(() => {});
+
+      const reqOrigin = req.headers.get("origin") || new URL(req.url).origin;
+      const corsProbe = await fetch(r1UploadUrl, {
+        method: "OPTIONS",
+        headers: {
+          Origin: reqOrigin,
+          "Access-Control-Request-Method": "PUT",
+          "Access-Control-Request-Headers": "content-type",
+        },
+      });
+      const allowOrigin = corsProbe.headers.get("access-control-allow-origin");
+      if (!allowOrigin) {
+        return Response.json(
+          {
+            error: `Cloudflare R2 credentials work, but R2 CORS preflight blocked origin "${reqOrigin}" (HTTP ${corsProbe.status}). In Cloudflare R2 -> Bucket Settings -> CORS Policy, set AllowedOrigins to ["${reqOrigin}"] and AllowedHeaders to ["content-type", "Content-Type"] (without "*").`,
+          },
+          { status: 502 }
+        );
+      }
+
       const r1Size = Math.max(0, Math.floor(Number(body.r1SizeBytes ?? 0)));
       const r2Size = Math.max(0, Math.floor(Number(body.r2SizeBytes ?? 0)));
       const optionsJson = JSON.stringify(options);

@@ -32,12 +32,11 @@ This project runs a **100% cloud-hosted bacterial & *Streptomyces* Whole-Genome 
    [
      {
        "AllowedOrigins": [
-         "https://*.netlify.app",
-         "http://localhost:5173",
-         "http://localhost:8888"
+         "https://mbd-wgs-portal.netlify.app",
+         "http://localhost:5173"
        ],
        "AllowedMethods": ["GET", "PUT", "DELETE", "HEAD"],
-       "AllowedHeaders": ["*"],
+       "AllowedHeaders": ["content-type", "Content-Type"],
        "ExposeHeaders": ["ETag"],
        "MaxAgeSeconds": 3600
      }

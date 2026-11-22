@@ -92,6 +92,7 @@ function uploadWithProgress(
     const startTs = performance.now();
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", url, true);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
     xhr.upload.onprogress = (ev) => {
       if (ev.lengthComputable) {
         const pct = Math.min(100, Math.round((ev.loaded / ev.total) * 100));
