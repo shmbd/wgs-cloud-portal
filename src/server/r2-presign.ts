@@ -1,4 +1,4 @@
-import { getEnv } from "./auth.ts";
+import type { Env } from "./env.ts";
 
 const encoder = new TextEncoder();
 
@@ -43,18 +43,20 @@ async function hmacRaw(
 
 export interface PresignOptions {
   method: "GET" | "PUT" | "DELETE";
-  objectKey: string;
+  objectKey?: string;
   expiresInSeconds?: number;
   downloadFilename?: string;
+  extraQuery?: [string, string][];
 }
 
 export async function createR2PresignedUrl(
+  env: Env,
   opts: PresignOptions
 ): Promise<string> {
-  const accountId = getEnv("R2_ACCOUNT_ID");
-  const accessKeyId = getEnv("R2_ACCESS_KEY_ID");
-  const secretAccessKey = getEnv("R2_SECRET_ACCESS_KEY");
-  const bucket = getEnv("R2_BUCKET_NAME");
+  const accountId = (env.R2_ACCOUNT_ID || "").trim();
+  const accessKeyId = (env.R2_ACCESS_KEY_ID || "").trim();
+  const secretAccessKey = (env.R2_SECRET_ACCESS_KEY || "").trim();
+  const bucket = (env.R2_BUCKET_NAME || "").trim();
 
   if (!accountId || !accessKeyId || !secretAccessKey || !bucket) {
     throw new Error(
@@ -65,19 +67,22 @@ export async function createR2PresignedUrl(
   const host = `${accountId}.r2.cloudflarestorage.com`;
   const region = "auto";
   const service = "s3";
-  const expires = opts.expiresInSeconds ?? 14400; // Default 4 hours
+  const expires = opts.expiresInSeconds ?? 14400;
 
   const now = new Date();
   const iso = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
-  const amzDate = iso; // YYYYMMDDTHHMMSSZ
-  const dateStamp = iso.slice(0, 8); // YYYYMMDD
+  const amzDate = iso;
+  const dateStamp = iso.slice(0, 8);
 
-  const encodedKey = opts.objectKey
-    .replace(/^\/+/, "")
-    .split("/")
-    .map(encodeRfc3986)
-    .join("/");
-  const canonicalUri = `/${encodeRfc3986(bucket)}/${encodedKey}`;
+  let canonicalUri = `/${encodeRfc3986(bucket)}`;
+  if (opts.objectKey) {
+    const encodedKey = opts.objectKey
+      .replace(/^\/+/, "")
+      .split("/")
+      .map(encodeRfc3986)
+      .join("/");
+    canonicalUri = `/${encodeRfc3986(bucket)}/${encodedKey}`;
+  }
 
   const queryEntries: [string, string][] = [
     ["X-Amz-Algorithm", "AWS4-HMAC-SHA256"],
@@ -88,6 +93,7 @@ export async function createR2PresignedUrl(
     ["X-Amz-Date", amzDate],
     ["X-Amz-Expires", String(expires)],
     ["X-Amz-SignedHeaders", "host"],
+    ...(opts.extraQuery ?? []),
   ];
 
   if (opts.method === "GET" && opts.downloadFilename) {
@@ -137,4 +143,86 @@ export async function createR2PresignedUrl(
   const signature = toHex(await hmacRaw(kSigning, stringToSign));
 
   return `https://${host}${canonicalUri}?${canonicalQueryString}&X-Amz-Signature=${signature}`;
+}
+
+export async function r2PutJson(
+  env: Env,
+  objectKey: string,
+  data: unknown
+): Promise<void> {
+  const putUrl = await createR2PresignedUrl(env, {
+    method: "PUT",
+    objectKey,
+    expiresInSeconds: 300,
+  });
+  const resp = await fetch(putUrl, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!resp.ok) {
+    const xml = await resp.text();
+    const codeMatch = xml.match(/<Code>([^<]+)<\/Code>/);
+    const msgMatch = xml.match(/<Message>([^<]+)<\/Message>/);
+    const r2Code = codeMatch ? codeMatch[1] : `HTTP ${resp.status}`;
+    const r2Msg = msgMatch ? msgMatch[1] : xml.slice(0, 200);
+    throw new Error(`Cloudflare R2 write error (${r2Code}): ${r2Msg}`);
+  }
+}
+
+export async function r2GetJson<T>(
+  env: Env,
+  objectKey: string
+): Promise<T | null> {
+  const getUrl = await createR2PresignedUrl(env, {
+    method: "GET",
+    objectKey,
+    expiresInSeconds: 300,
+  });
+  const resp = await fetch(getUrl, { method: "GET" });
+  if (resp.status === 404) return null;
+  if (!resp.ok) {
+    throw new Error(`Cloudflare R2 read error (HTTP ${resp.status})`);
+  }
+  return (await resp.json()) as T;
+}
+
+export async function r2DeleteKey(env: Env, objectKey: string): Promise<void> {
+  const delUrl = await createR2PresignedUrl(env, {
+    method: "DELETE",
+    objectKey,
+    expiresInSeconds: 300,
+  });
+  await fetch(delUrl, { method: "DELETE" });
+}
+
+export async function r2ListKeys(env: Env, prefix: string): Promise<string[]> {
+  const listUrl = await createR2PresignedUrl(env, {
+    method: "GET",
+    expiresInSeconds: 300,
+    extraQuery: [
+      ["list-type", "2"],
+      ["max-keys", "200"],
+      ["prefix", prefix],
+    ],
+  });
+  const resp = await fetch(listUrl, { method: "GET" });
+  if (!resp.ok) {
+    throw new Error(`Cloudflare R2 list error (HTTP ${resp.status})`);
+  }
+  const xml = await resp.text();
+  const keys: string[] = [];
+  const regex = /<Key>([^<]+)<\/Key>/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(xml)) !== null) {
+    keys.push(
+      match[1]
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'")
+    );
+  }
+  return keys;
 }

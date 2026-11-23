@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
 """
-BioForge WGS Cloud Pipeline Orchestrator
-Runs inside GitHub Actions (4 vCPU / 16 GB RAM Ubuntu runner):
-  1. Fetches job config & scoped R2 presigned URLs from Netlify Portal
-  2. Downloads paired-end FASTQ reads from Cloudflare R2
-  3. Runs fastp read QC & adapter trimming
-  4. Runs SPAdes de novo genome assembly (--isolate / --careful, 14 GB RAM)
-  5. Automatically deletes raw FASTQ uploads from Cloudflare R2 to save storage
-  6. Runs QUAST assembly evaluation & contig statistics
-  7. Runs Prokka bacterial genome annotation (CDS, rRNA, tRNA, GenBank/GFF/FAA)
-  8. Runs ABRicate antimicrobial resistance (CARD, NCBI) & virulence (VFDB) screening
-  9. Packages all outputs into a ZIP archive, uploads results to R2, and posts
-     interactive metrics & annotated gene catalog back to the Netlify Portal.
+BioForge WGS Cloud Pipeline Orchestrator (Cloudflare Pages + R2 Edition)
+Safe for Public GitHub Repositories (4 vCPU / 16 GB RAM / Unlimited Free Minutes):
+  - Registers ::add-mask:: on all presigned URLs, hostnames, and portal endpoints
+  - Never prints raw storage URLs or sequence paths to public runner logs
+  - Auto-detects runner CPU cores & RAM (uses 4 threads / 14 GB RAM on Public runners,
+    and scales safely to 2 threads / 6 GB RAM on Private runners)
 """
 
 import csv
@@ -23,6 +17,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -34,18 +29,61 @@ PORTAL_URL = os.environ.get("PORTAL_URL", "").strip().rstrip("/")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
 GH_RUN_URL = os.environ.get("GH_RUN_URL", "").strip()
 
+
+def mask_value(val: str):
+    cleaned = (val or "").strip()
+    if len(cleaned) >= 6:
+        print(f"::add-mask::{cleaned}", flush=True)
+
+
+mask_value(PORTAL_URL)
+mask_value(WEBHOOK_SECRET)
+
 if not JOB_ID or not PORTAL_URL or not WEBHOOK_SECRET:
-    print("ERROR: Missing JOB_ID, PORTAL_URL, or WEBHOOK_SECRET environment variables.", file=sys.stderr)
+    print("ERROR: Missing required pipeline environment variables.", file=sys.stderr)
     sys.exit(1)
 
 CALLBACK_URL = f"{PORTAL_URL}/api/worker/jobs/{JOB_ID}"
+mask_value(CALLBACK_URL)
+
+
+def detect_runner_resources() -> tuple[int, int, int]:
+    cpus = max(1, os.cpu_count() or 2)
+    total_ram_gb = 7
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    kb = int(line.split()[1])
+                    total_ram_gb = max(4, round(kb / (1024 * 1024)))
+                    break
+    except Exception:
+        pass
+    # Reserve ~2 GB for OS/Python buffers
+    spades_mem_gb = max(4, total_ram_gb - 2)
+    return cpus, total_ram_gb, spades_mem_gb
+
+
+def mask_presigned_urls(urls_dict: dict):
+    for url in urls_dict.values():
+        if not isinstance(url, str) or not url:
+            continue
+        mask_value(url)
+        parsed = urllib.parse.urlparse(url)
+        if parsed.netloc:
+            mask_value(parsed.netloc)
+        qs = urllib.parse.parse_qs(parsed.query)
+        for vals in qs.values():
+            for v in vals:
+                if len(v) >= 8:
+                    mask_value(v)
 
 
 def api_request(method: str, url: str, payload: dict | None = None) -> dict:
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     headers = {
         "Authorization": f"Bearer {WEBHOOK_SECRET}",
-        "User-Agent": "BioForge-WGS-Cloud-Worker/1.0",
+        "User-Agent": "BioForge-WGS-Cloud-Worker/2.0",
     }
     if data is not None:
         headers["Content-Type"] = "application/json"
@@ -59,7 +97,7 @@ def api_request(method: str, url: str, payload: dict | None = None) -> dict:
         except Exception as exc:
             if attempt == 3:
                 raise
-            print(f"[warn] API {method} retry {attempt + 1}/3 after error: {exc}")
+            print(f"[warn] Callback retry {attempt + 1}/3 ({type(exc).__name__})")
             time.sleep(3 * (attempt + 1))
     return {}
 
@@ -101,29 +139,38 @@ def update_portal(
     try:
         api_request("POST", CALLBACK_URL, body)
     except Exception as exc:
-        print(f"[warn] Non-fatal status update failure: {exc}", file=sys.stderr)
+        print(f"[warn] Non-fatal status update warning ({type(exc).__name__})", file=sys.stderr)
 
 
-def run_cmd(cmd: list[str], cwd: Path | None = None):
-    print(f"+ {' '.join(cmd)}", flush=True)
+def run_cmd(cmd: list[str], cwd: Path | None = None, quiet_args: bool = False):
+    if not quiet_args:
+        print(f"+ {' '.join(cmd)}", flush=True)
     subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
 
 
-def download_file(presigned_url: str, dest: Path):
-    run_cmd([
-        "curl", "-fSL", "--retry", "4", "--retry-delay", "5",
-        "-o", str(dest), presigned_url
-    ])
+def download_file(presigned_url: str, dest: Path, label: str):
+    print(f"[download] Fetching {label} into runner workspace...", flush=True)
+    run_cmd(
+        [
+            "curl", "-fsSL", "--retry", "4", "--retry-delay", "5",
+            "-o", str(dest), presigned_url,
+        ],
+        quiet_args=True,
+    )
 
 
-def upload_file(presigned_url: str, src: Path, content_type: str = "application/octet-stream"):
-    run_cmd([
-        "curl", "-fSL", "--retry", "4", "--retry-delay", "5",
-        "-X", "PUT",
-        "-H", f"Content-Type: {content_type}",
-        "--upload-file", str(src),
-        presigned_url
-    ])
+def upload_file(presigned_url: str, src: Path, content_type: str, label: str):
+    print(f"[upload] Uploading {label} to encrypted R2 storage...", flush=True)
+    run_cmd(
+        [
+            "curl", "-fsSL", "--retry", "4", "--retry-delay", "5",
+            "-X", "PUT",
+            "-H", f"Content-Type: {content_type}",
+            "--upload-file", str(src),
+            presigned_url,
+        ],
+        quiet_args=True,
+    )
 
 
 def delete_r2_url(presigned_url: str) -> bool:
@@ -132,12 +179,8 @@ def delete_r2_url(presigned_url: str) -> bool:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return 200 <= resp.status < 300
     except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return True
-        print(f"[warn] R2 DELETE HTTP {exc.code}: {exc}", file=sys.stderr)
-        return False
-    except Exception as exc:
-        print(f"[warn] R2 DELETE error: {exc}", file=sys.stderr)
+        return exc.code == 404
+    except Exception:
         return False
 
 
@@ -174,7 +217,6 @@ def compute_assembly_metrics(contigs_fasta: Path, filtered_fasta: Path, min_len:
     top_contigs = []
     cov_re = re.compile(r"cov_([0-9.]+)")
 
-    # Write filtered contigs for annotation & AMR
     kept_records = []
     for hdr, seq in records:
         length = len(seq)
@@ -256,7 +298,7 @@ def classify_gene_product(product: str) -> str:
         return "Hypothetical / Uncharacterized"
     if any(k in p for k in ["polyketide", "non-ribosomal", "nrps", "pks", "terpene", "siderophore", "lantibiotic", "bacteriocin", "cytochrome p450", "thioesterase"]):
         return "Secondary Metabolism & BGCs"
-    if any(k in p for k in ["transcriptional regulator", "two-component", "sigma factor", "repressor", "activator", "sensor histidine", "luxr", "tetr", "marR", "streptomyces antibiotic regulatory"]):
+    if any(k in p for k in ["transcriptional regulator", "two-component", "sigma factor", "repressor", "activator", "sensor histidine", "luxr", "tetr", "marr", "streptomyces antibiotic regulatory"]):
         return "Regulation & Signal Transduction"
     if any(k in p for k in ["abc transporter", "permease", "efflux", "transporter", "symporter", "antiporter", "porin", "secretion"]):
         return "Transport & Efflux Systems"
@@ -348,9 +390,9 @@ def run_abricate_scans(filtered_fasta: Path, out_dir: Path) -> list[dict]:
         cmd = [
             "micromamba", "run", "-n", "wgs_ann",
             "abricate", "--db", db_name, "--minid", "75", "--mincov", "60",
-            str(filtered_fasta)
+            str(filtered_fasta),
         ]
-        print(f"+ {' '.join(cmd)}", flush=True)
+        print(f"+ abricate --db {db_name}", flush=True)
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if res.returncode == 0 and res.stdout:
             tsv_out.write_text(res.stdout, encoding="utf-8")
@@ -381,17 +423,20 @@ def run_abricate_scans(filtered_fasta: Path, out_dir: Path) -> list[dict]:
 
 
 def main():
+    cpus, total_ram_gb, spades_mem_gb = detect_runner_resources()
     work_dir = Path.cwd() / "wgs_work"
     work_dir.mkdir(parents=True, exist_ok=True)
     bundle_dir = work_dir / "results_bundle"
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # 1. Fetch job spec & presigned R2 URLs
         spec = api_request("GET", CALLBACK_URL)
         job = spec["job"]
         urls = spec["urls"]
         keys = spec["keys"]
+
+        # Immediately mask all presigned URLs & signatures in GitHub logs
+        mask_presigned_urls(urls)
 
         sample = re.sub(r"[^a-zA-Z0-9_-]", "_", job["sampleName"])[:24] or "Sample"
         genus = job.get("genus") or "Streptomyces"
@@ -409,28 +454,27 @@ def main():
 
         update_portal(
             status="running",
-            stage_title="Downloading paired-end FASTQ reads from Cloudflare R2",
+            stage_title=f"Downloading paired-end FASTQ reads ({cpus} vCPU / {total_ram_gb} GB runner)",
             progress=16,
             log_stage="download",
-            log_msg=f"Cloud runner initialized (4 vCPU, 16 GB RAM). Downloading {job['r1Filename']} and {job['r2Filename']}...",
+            log_msg=f"Cloud runner initialized ({cpus} vCPU, {total_ram_gb} GB RAM). Downloading paired-end FASTQ files...",
         )
 
         raw_r1 = work_dir / "raw_R1.fastq.gz"
         raw_r2 = work_dir / "raw_R2.fastq.gz"
-        download_file(urls["r1GetUrl"], raw_r1)
-        download_file(urls["r2GetUrl"], raw_r2)
+        download_file(urls["r1GetUrl"], raw_r1, "Forward Reads (R1)")
+        download_file(urls["r2GetUrl"], raw_r2, "Reverse Reads (R2)")
 
         asm_r1 = raw_r1
         asm_r2 = raw_r2
 
-        # 2. Fastp Read QC & Trimming
         if run_fastp:
             update_portal(
                 status="running",
                 stage_title="Read QC & adapter trimming (fastp)",
                 progress=26,
                 log_stage="fastp",
-                log_msg="Running fastp paired-end quality filtering and adapter trimming...",
+                log_msg=f"Running fastp paired-end quality filtering ({cpus} threads)...",
             )
             clean_r1 = work_dir / "clean_R1.fastq.gz"
             clean_r2 = work_dir / "clean_R2.fastq.gz"
@@ -445,7 +489,7 @@ def main():
                 "-o", str(clean_r1),
                 "-O", str(clean_r2),
                 "--detect_adapter_for_pe",
-                "--thread", "4",
+                "--thread", str(cpus),
                 "--json", str(fastp_json),
                 "--html", str(fastp_html),
             ])
@@ -480,14 +524,13 @@ def main():
                     metrics=metrics,
                 )
 
-        # 3. SPAdes Assembly
         spades_flag = "--careful" if spades_mode == "careful" else "--isolate"
         update_portal(
             status="running",
-            stage_title=f"De novo assembly (SPAdes {spades_flag}, 14 GB RAM)",
+            stage_title=f"De novo assembly (SPAdes {spades_flag}, {cpus} vCPU / {spades_mem_gb} GB RAM)",
             progress=42,
             log_stage="spades",
-            log_msg=f"Running SPAdes ({spades_flag}, 4 threads, 14 GB RAM limit)...",
+            log_msg=f"Running SPAdes ({spades_flag}, {cpus} threads, {spades_mem_gb} GB RAM)...",
         )
 
         spades_dir = work_dir / "spades_out"
@@ -497,12 +540,11 @@ def main():
             spades_flag,
             "-1", str(asm_r1),
             "-2", str(asm_r2),
-            "-t", "4",
-            "-m", "14",
+            "-t", str(cpus),
+            "-m", str(spades_mem_gb),
             "-o", str(spades_dir),
         ])
 
-        # Free runner disk immediately & purge raw FASTQs from Cloudflare R2
         asm_r1.unlink(missing_ok=True)
         asm_r2.unlink(missing_ok=True)
         for sub in spades_dir.iterdir():
@@ -543,19 +585,17 @@ def main():
             raw_deleted=raw_cleaned,
         )
 
-        # 4. QUAST Assembly Assessment
         quast_dir = bundle_dir / "02_quast"
         run_cmd([
             "micromamba", "run", "-n", "wgs_asm",
             "quast.py",
             str(contigs_raw),
             "-o", str(quast_dir),
-            "--threads", "4",
+            "--threads", str(cpus),
             "--min-contig", "500",
             "--no-icarus",
         ])
 
-        # 5. Prokka Genome Annotation
         genes_list: list[dict] = []
         prokka_dir = bundle_dir / "03_prokka_annotation"
         if run_prokka:
@@ -564,7 +604,7 @@ def main():
                 stage_title=f"Annotating genome (Prokka — {genus} {species})",
                 progress=78,
                 log_stage="prokka",
-                log_msg=f"Running Prokka annotation on contigs >= {min_contig_len} bp...",
+                log_msg=f"Running Prokka annotation ({cpus} CPUs) on contigs >= {min_contig_len} bp...",
             )
             run_cmd([
                 "micromamba", "run", "-n", "wgs_ann",
@@ -578,7 +618,7 @@ def main():
                 "--kingdom", "Bacteria",
                 "--centre", "MBDNIB",
                 "--compliant",
-                "--cpus", "4",
+                "--cpus", str(cpus),
                 "--force",
                 str(filtered_contigs),
             ])
@@ -599,13 +639,11 @@ def main():
                 metrics=metrics,
             )
 
-        # 6. ABRicate AMR & Virulence Screening
         if run_abricate:
             amr_dir = bundle_dir / "04_amr_virulence"
             amr_hits = run_abricate_scans(filtered_contigs, amr_dir)
             metrics["amrHits"] = amr_hits
 
-        # 7. Package & Upload Results to Cloudflare R2
         update_portal(
             status="running",
             stage_title="Packaging & uploading results archive",
@@ -621,22 +659,22 @@ def main():
                     zf.write(file_p, arcname=str(file_p.relative_to(bundle_dir)))
 
         output_keys: dict = {}
-        upload_file(urls["resultsZipPutUrl"], zip_path, "application/zip")
+        upload_file(urls["resultsZipPutUrl"], zip_path, "application/zip", "Complete Results ZIP")
         output_keys["resultsZipKey"] = keys["resultsZipKey"]
 
-        upload_file(urls["contigsPutUrl"], filtered_contigs, "text/plain")
+        upload_file(urls["contigsPutUrl"], filtered_contigs, "text/plain", "Filtered Contigs FASTA")
         output_keys["contigsKey"] = keys["contigsKey"]
 
         gbk_file = prokka_dir / f"{sample}.gbk"
         if not gbk_file.exists():
             gbk_file = prokka_dir / f"{sample}.gbf"
         if gbk_file.exists():
-            upload_file(urls["gbkPutUrl"], gbk_file, "text/plain")
+            upload_file(urls["gbkPutUrl"], gbk_file, "text/plain", "Prokka GenBank File")
             output_keys["gbkKey"] = keys["gbkKey"]
 
         quast_html = quast_dir / "report.html"
         if quast_html.exists():
-            upload_file(urls["quastHtmlPutUrl"], quast_html, "text/html")
+            upload_file(urls["quastHtmlPutUrl"], quast_html, "text/html", "QUAST HTML Report")
             output_keys["quastHtmlKey"] = keys["quastHtmlKey"]
 
         metrics["runtimeSeconds"] = int(time.time() - START_TIME)
@@ -657,14 +695,14 @@ def main():
 
     except Exception as exc:
         err_str = str(exc)
-        print(f"FATAL PIPELINE ERROR: {err_str}", file=sys.stderr)
+        print(f"FATAL PIPELINE ERROR: {type(exc).__name__}", file=sys.stderr)
         update_portal(
             status="failed",
             stage_title="Pipeline failed",
             log_stage="error",
-            log_msg=f"Pipeline failed: {err_str[:400]}",
+            log_msg=f"Pipeline failed: {err_str[:300]}",
             log_level="error",
-            error_msg=err_str[:500],
+            error_msg=err_str[:400],
         )
         sys.exit(1)
 

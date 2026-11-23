@@ -1,9 +1,4 @@
-declare const Netlify:
-  | { env?: { get(name: string): string | undefined } }
-  | undefined;
-declare const process:
-  | { env?: Record<string, string | undefined> }
-  | undefined;
+import type { Env } from "./env.ts";
 
 const encoder = new TextEncoder();
 
@@ -41,28 +36,23 @@ async function hmacSign(secret: string, message: string): Promise<string> {
   return toHex(sig);
 }
 
-export function getEnv(name: string): string {
-  if (typeof Netlify !== "undefined" && Netlify.env?.get) {
-    return Netlify.env.get(name) ?? "";
-  }
-  return typeof process !== "undefined" ? process?.env?.[name] ?? "" : "";
-}
-
-function getSigningSecret(): string {
-  const secret = getEnv("WEBHOOK_SECRET") || getEnv("PORTAL_PASSCODE");
+function getSigningSecret(env: Env): string {
+  const secret = (env.WEBHOOK_SECRET || env.PORTAL_PASSCODE || "").trim();
   return secret || "dev-local-fallback-secret-change-in-production";
 }
 
-export async function createPortalSessionToken(): Promise<string> {
+export async function createPortalSessionToken(env: Env): Promise<string> {
   const exp = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days
   const payload = `portal:${exp}`;
-  const sig = await hmacSign(getSigningSecret(), payload);
+  const sig = await hmacSign(getSigningSecret(env), payload);
   return btoa(`${payload}:${sig}`);
 }
 
-export async function verifyPortalAuth(req: Request): Promise<boolean> {
-  const configuredPasscode = getEnv("PORTAL_PASSCODE");
-  // If no passcode is configured yet, only allow status inspection, not mutations
+export async function verifyPortalAuth(
+  req: Request,
+  env: Env
+): Promise<boolean> {
+  const configuredPasscode = (env.PORTAL_PASSCODE || "").trim();
   if (!configuredPasscode) return false;
 
   const authHeader = req.headers.get("authorization") || "";
@@ -76,21 +66,27 @@ export async function verifyPortalAuth(req: Request): Promise<boolean> {
     const exp = Number(expStr);
     if (!Number.isFinite(exp) || Date.now() > exp) return false;
 
-    const expectedSig = await hmacSign(getSigningSecret(), `portal:${expStr}`);
+    const expectedSig = await hmacSign(
+      getSigningSecret(env),
+      `portal:${expStr}`
+    );
     return timingSafeEqual(sig, expectedSig);
   } catch {
     return false;
   }
 }
 
-export function verifyPasscodeInput(inputPasscode: string): boolean {
-  const configuredPasscode = getEnv("PORTAL_PASSCODE");
+export function verifyPasscodeInput(
+  inputPasscode: string,
+  env: Env
+): boolean {
+  const configuredPasscode = (env.PORTAL_PASSCODE || "").trim();
   if (!configuredPasscode || !inputPasscode) return false;
-  return timingSafeEqual(inputPasscode, configuredPasscode);
+  return timingSafeEqual(inputPasscode.trim(), configuredPasscode);
 }
 
-export function verifyWorkerWebhook(req: Request): boolean {
-  const secret = getEnv("WEBHOOK_SECRET");
+export function verifyWorkerWebhook(req: Request, env: Env): boolean {
+  const secret = (env.WEBHOOK_SECRET || "").trim();
   if (!secret) return false;
   const authHeader = req.headers.get("authorization") || "";
   if (!authHeader.startsWith("Bearer ")) return false;
@@ -98,17 +94,19 @@ export function verifyWorkerWebhook(req: Request): boolean {
   return timingSafeEqual(provided, secret);
 }
 
-export function getSystemReadiness() {
+export function getSystemReadiness(env: Env) {
   return {
-    passcodeConfigured: Boolean(getEnv("PORTAL_PASSCODE")),
-    webhookConfigured: Boolean(getEnv("WEBHOOK_SECRET")),
-    githubConfigured: Boolean(getEnv("GITHUB_REPO") && getEnv("GITHUB_TOKEN")),
-    r2Configured: Boolean(
-      getEnv("R2_ACCOUNT_ID") &&
-        getEnv("R2_ACCESS_KEY_ID") &&
-        getEnv("R2_SECRET_ACCESS_KEY") &&
-        getEnv("R2_BUCKET_NAME")
+    passcodeConfigured: Boolean((env.PORTAL_PASSCODE || "").trim()),
+    webhookConfigured: Boolean((env.WEBHOOK_SECRET || "").trim()),
+    githubConfigured: Boolean(
+      (env.GITHUB_REPO || "").trim() && (env.GITHUB_TOKEN || "").trim()
     ),
-    githubRepo: getEnv("GITHUB_REPO") || null,
+    r2Configured: Boolean(
+      (env.R2_ACCOUNT_ID || "").trim() &&
+        (env.R2_ACCESS_KEY_ID || "").trim() &&
+        (env.R2_SECRET_ACCESS_KEY || "").trim() &&
+        (env.R2_BUCKET_NAME || "").trim()
+    ),
+    githubRepo: (env.GITHUB_REPO || "").trim() || null,
   };
 }

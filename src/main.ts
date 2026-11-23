@@ -946,6 +946,8 @@ function bindEvents() {
     state.r2Progress = 0;
     render();
 
+    let createdJobId: string | null = null;
+    let uploadsFinished = false;
     try {
       const created = await apiFetch<{
         job: WgsJob;
@@ -971,6 +973,7 @@ function bindEvents() {
           },
         }),
       });
+      createdJobId = created.job.id;
 
       await uploadWithProgress(created.r1UploadUrl, state.r1File, (pct, mbps) => {
         state.r1Progress = pct;
@@ -983,6 +986,7 @@ function bindEvents() {
         state.uploadRateMbps = mbps;
         render();
       });
+      uploadsFinished = true;
 
       const started = await apiFetch<{ job: WgsJob }>(
         `/api/jobs/${created.job.id}/start`,
@@ -1000,6 +1004,11 @@ function bindEvents() {
       await refreshJobs(false);
     } catch (err) {
       state.uploading = false;
+      if (createdJobId && !uploadsFinished) {
+        apiFetch(`/api/jobs/${createdJobId}`, { method: "DELETE" }).catch(() => {});
+      } else {
+        await refreshJobs(false);
+      }
       state.formError = err instanceof Error ? err.message : "Pipeline submission failed";
       render();
     }
@@ -1067,16 +1076,16 @@ function bindEvents() {
   });
 }
 
-// Poll active cloud jobs automatically every 8 seconds
+// Credit-friendly polling: every 30s only when tab is visible and a job is actively running
 setInterval(() => {
-  if (!state.authenticated || state.uploading) return;
+  if (document.hidden || !state.authenticated || state.uploading) return;
   const hasActive = state.jobs.some((j) =>
-    ["uploading", "queued", "running"].includes(j.status)
+    ["queued", "running"].includes(j.status)
   );
   if (hasActive || ["queued", "running"].includes(state.selectedJob.status)) {
     refreshJobs(false);
   }
-}, 8000);
+}, 30000);
 
 render();
 checkAuthStatus();

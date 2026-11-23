@@ -1,17 +1,1 @@
-"$schema" = "https://open-api.netlify.com/netlify.schema.json"
-
-[build]
-  command = "npm run build"
-  publish = "dist"
-  environment = { NODE_VERSION = "22" }
-
-[functions]
-  directory = "netlify/functions"
-  node_bundler = "esbuild"
-
-[[headers]]
-  for = "/*"
-  [headers.values]
-    X-Frame-Options = "DENY"
-    X-Content-Type-Options = "nosniff"
-    Referrer-Policy = "strict-origin-when-cross-origin"
+# Migrated to Cloudflare Pages (functions/api/*) — Netlify config retired.

@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       portal_url:
-        description: "Base URL of the Netlify WGS Portal"
+        description: "Base URL of the Cloudflare Pages WGS Portal"
         required: true
         type: string
 
@@ -22,13 +22,19 @@ jobs:
     timeout-minutes: 330
 
     steps:
+      - name: Mask Dynamic Inputs
+        run: |
+          echo "::add-mask::${{ inputs.portal_url }}"
+
       - name: Checkout Pipeline Repository
         uses: actions/checkout@v4
 
-      - name: Free Extra Runner Disk Space
+      - name: Free Extra Runner Disk Space & Check Hardware
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
-          df -h
+          echo "Runner CPUs: $(nproc)"
+          free -h
+          df -h /
 
       - name: Setup Micromamba & Bioinformatics Environments
         uses: mamba-org/setup-micromamba@v2

@@ -1,103 +1,89 @@
-# BioForge WGS Cloud Portal — Setup & Deployment Guide
+# BioForge WGS Cloud Portal — Cloudflare Pages + 16 GB GitHub Runner Guide
 
-This project runs a **100% cloud-hosted bacterial & *Streptomyces* Whole-Genome Sequencing (WGS) pipeline** (`fastp` → `SPAdes` → `QUAST` → `Prokka` → `ABRicate`) for **$0/month** on free tiers:
+This project runs a **100% free, zero-credit-cap** Whole-Genome Sequencing (WGS) pipeline (`fastp` → `SPAdes` → `QUAST` → `Prokka` → `ABRicate`):
 
-- **Netlify**: Hosts the web dashboard, serverless API (`netlify/functions`), auto-provisioned Postgres job tracker (`@netlify/database`), and gene catalog store (`@netlify/blobs`).
-- **Cloudflare R2 (Free 10 GB, $0 bandwidth)**: Receives direct encrypted ~1 GB paired-end `.fastq.gz` uploads from your browser and automatically deletes raw reads as soon as SPAdes finishes so your free 10 GB bucket never fills up.
-- **GitHub Actions (4 vCPU, 16 GB RAM Ubuntu runner)**: Executes the heavy assembly and annotation in the cloud—**you can shut down your PC immediately after uploading**.
-
----
-
-## Step 1: Push This Folder to a Private GitHub Repository
-
-1. Create a **new Private repository** on GitHub (for example: `wgs-cloud-portal`).
-2. Open a terminal in `D:\wgs-cloud-portal` and push the code:
-   ```powershell
-   cd D:\wgs-cloud-portal
-   git init
-   git branch -M main
-   git add .
-   git commit -m "Initial BioForge WGS Cloud Portal"
-   git remote add origin https://github.com/<YOUR_USERNAME>/wgs-cloud-portal.git
-   git push -u origin main
-   ```
+- **Cloudflare Pages**: Hosts the web UI and serverless `functions/api/*` endpoints (**500 free deploys/month**, **unlimited bandwidth**, **100,000 free API requests/day**, **no credit system**).
+- **Cloudflare R2 (`wgs-pipeline-storage`)**: Stores both job metadata JSON and encrypted FASTQ/result streams (**0 idle database drain**, auto-deletes ~1 GB raw FASTQ files right after SPAdes finishes).
+- **GitHub Actions (Public Repo = 4 vCPUs, 16 GB RAM, Unlimited Free Minutes)**: Runs assembly & annotation **2× faster** with strict `::add-mask::` log masking so presigned URLs and genome files stay 100% private inside R2.
 
 ---
 
-## Step 2: Create a Free Cloudflare R2 Bucket (5 Minutes)
+## Step 1: Push the Updated Code to GitHub
 
-1. Sign in at [dash.cloudflare.com](https://dash.cloudflare.com/) → **R2 Object Storage** → **Create bucket** → name it `wgs-pipeline-storage`.
-2. Open your bucket → **Settings** → **CORS Policy** → click **Add CORS policy** and paste:
+```powershell
+cd D:\wgs-cloud-portal
+git add .
+git commit -m "Migrate to Cloudflare Pages + R2 store + masked 16GB runner"
+git push
+```
+
+---
+
+## Step 2: Unlock 2× Faster Compute (4 vCPU / 16 GB RAM + Unlimited Minutes)
+
+1. Open your GitHub repository: `https://github.com/shmbd/wgs-cloud-portal/settings`
+2. Scroll to the bottom (**Danger Zone**) → **Change repository visibility** → **Change to Public**.
+   *(Safe: Your repo contains zero secrets and zero genome files—all sequences stay private in Cloudflare R2, and all presigned URLs are masked in logs.)*
+
+---
+
+## Step 3: Add `*.pages.dev` to Your Cloudflare R2 CORS Policy
+
+1. Open your R2 bucket settings:
+   `https://dash.cloudflare.com/72528d98e8dcae6a6411bd6fc4728a6a/r2/default/buckets/wgs-pipeline-storage/settings`
+2. Scroll to **CORS Policy** → **Edit** → **JSON** and paste:
    ```json
    [
      {
        "AllowedOrigins": [
-         "https://mbd-wgs-portal.netlify.app",
+         "https://*.pages.dev",
          "http://localhost:5173"
        ],
-       "AllowedMethods": ["GET", "PUT", "DELETE", "HEAD"],
-       "AllowedHeaders": ["content-type", "Content-Type"],
-       "ExposeHeaders": ["ETag"],
+       "AllowedMethods": [
+         "GET",
+         "PUT",
+         "DELETE",
+         "HEAD"
+       ],
+       "AllowedHeaders": [
+         "content-type",
+         "Content-Type"
+       ],
+       "ExposeHeaders": [
+         "ETag"
+       ],
        "MaxAgeSeconds": 3600
      }
    ]
    ```
-3. Go back to **R2 Overview** → **Manage R2 API Tokens** → **Create API token**:
-   - Permissions: **Object Read & Write** scoped to `wgs-pipeline-storage`
-   - Copy these 4 values:
-     - `R2_ACCOUNT_ID` (your 32-character Cloudflare Account ID)
-     - `R2_ACCESS_KEY_ID`
-     - `R2_SECRET_ACCESS_KEY`
-     - `R2_BUCKET_NAME` (`wgs-pipeline-storage`)
+3. Click **Save**.
 
 ---
 
-## Step 3: Create Your GitHub Token & Repo Secret
+## Step 4: Deploy on Cloudflare Pages (2 Minutes)
 
-1. **Generate a Fine-Grained Personal Access Token**:
-   - Go to GitHub → **Settings** → **Developer settings** → **Personal access tokens** → **Fine-grained tokens** → **Generate new token**.
-   - **Repository access**: *Only select repositories* → pick `wgs-cloud-portal`.
-   - **Repository permissions** → **Actions**: **Read and write** (`Metadata: Read-only` is selected automatically).
-   - Generate and copy the token (`github_pat_...`) as `GITHUB_TOKEN`.
-2. **Add `WEBHOOK_SECRET` to GitHub Actions Secrets**:
-   - Pick any strong random string (e.g. `mbd_nib_wgs_secret_2026_9f8a7b6c5d`).
-   - In your GitHub repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
-     - Name: `WEBHOOK_SECRET`
-     - Secret: *(paste that exact string)*
-
----
-
-## Step 4: Deploy to Netlify & Set Environment Variables
-
-1. Log in to [app.netlify.com](https://app.netlify.com/) → **Add new site** → **Import an existing project** → connect your GitHub `wgs-cloud-portal` repository.
-   - Build command: `npm run build` *(auto-detected from `netlify.toml`)*
-   - Publish directory: `dist` *(auto-detected from `netlify.toml`)*
-   - Netlify automatically provisions your **Netlify Database** (`netlify/database/migrations/0001_init.sql`) and **Netlify Blobs**.
-2. Go to **Site configuration** → **Environment variables** and add (with **Functions** + **Builds** scopes):
-
-   | Variable | Value |
-   | :--- | :--- |
-   | `PORTAL_PASSCODE` | Password you will type in the web UI to unlock uploads |
-   | `WEBHOOK_SECRET` | Exact same `WEBHOOK_SECRET` added to GitHub Actions Secrets |
-   | `GITHUB_REPO` | `<YOUR_USERNAME>/wgs-cloud-portal` |
-   | `GITHUB_TOKEN` | Your `github_pat_...` token from Step 3 |
-   | `GITHUB_BRANCH` | `main` |
-   | `R2_ACCOUNT_ID` | Your Cloudflare Account ID |
-   | `R2_ACCESS_KEY_ID` | Your R2 Access Key ID |
-   | `R2_SECRET_ACCESS_KEY` | Your R2 Secret Access Key |
-   | `R2_BUCKET_NAME` | `wgs-pipeline-storage` |
-
-3. Trigger a **Redeploy** (**Deploys** → **Trigger deploy** → **Deploy site**) so the environment variables are active in Functions.
-4. Open your live `.netlify.app` URL and click **⚙ Cloud Setup Status** in the top bar—all 4 indicators will show green (`✓ Cloud Ready`)!
+1. In your [Cloudflare Dashboard](https://dash.cloudflare.com/), look at the left sidebar → click **Compute (Workers)** → **Workers & Pages** → click **Create** (top right).
+2. Switch to the **Pages** tab at the top → click **Import an existing Git repository** (or **Connect to Git**).
+3. Select your GitHub account and choose **`wgs-cloud-portal`**.
+4. Set build settings:
+   - **Project name**: `mbd-wgs-portal` *(gives you `https://mbd-wgs-portal.pages.dev`)*
+   - **Production branch**: `main`
+   - **Framework preset**: `Vite`
+   - **Build command**: `npm run build`
+   - **Build output directory**: `dist`
+5. Expand **Environment variables (advanced)** (or add them after creation under **Settings → Variables and Secrets**) and add these 9 variables:
+   - `PORTAL_PASSCODE` = your login passcode (e.g. `1349`)
+   - `WEBHOOK_SECRET` = exact same `WEBHOOK_SECRET` saved in GitHub Actions Secrets
+   - `GITHUB_REPO` = `shmbd/wgs-cloud-portal`
+   - `GITHUB_TOKEN` = your valid `github_pat_...` token (with **Actions: Read and write**)
+   - `GITHUB_BRANCH` = `main`
+   - `R2_ACCOUNT_ID` = `72528d98e8dcae6a6411bd6fc4728a6a`
+   - `R2_ACCESS_KEY_ID` = your active R2 Access Key ID
+   - `R2_SECRET_ACCESS_KEY` = your matching R2 Secret Access Key
+   - `R2_BUCKET_NAME` = `wgs-pipeline-storage`
+6. Click **Save and Deploy**! *(If you add/edit variables after the first deploy, go to **Deployments → Retry deployment** once so the variables take effect.)*
 
 ---
 
-## Local Preview on Your PC (Optional)
-
-If you open `D:\wgs-cloud-portal` in your IDE/terminal:
-```powershell
-cd D:\wgs-cloud-portal
-npm install
-npm run dev
-```
-Vite + `@netlify/vite-plugin` emulates Netlify Functions, Netlify Database, and Netlify Blobs locally at `http://localhost:5173`.
+## Step 5 (Optional): Pause/Delete Old Netlify Project
+To keep all 300 Netlify credits solely for `mbd-nib` and `saddam-hossain`, open `https://app.netlify.com/projects/mbd-wgs-portal/configuration/general` → scroll to bottom → **Delete project**.
