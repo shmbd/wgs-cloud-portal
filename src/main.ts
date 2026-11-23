@@ -759,7 +759,14 @@ function renderWorkspace(): string {
           </div>
           ${
             !job.isDemo && state.authenticated
-              ? `<button class="btn btn-danger btn-sm" id="btn-delete-job">Delete Job</button>`
+              ? `<div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+                  ${
+                    job.status === "failed" && !job.rawReadsDeleted
+                      ? `<button class="btn btn-secondary btn-sm" id="btn-retry-job">↻ Retry Cloud Trigger (No Re-Upload)</button>`
+                      : ""
+                  }
+                  <button class="btn btn-danger btn-sm" id="btn-delete-job">Delete Job</button>
+                </div>`
               : ""
           }
         </div>
@@ -1031,6 +1038,20 @@ function bindEvents() {
 
   document.getElementById("btn-export-csv")?.addEventListener("click", () => {
     exportGenesCsv(state.selectedJob.genes || [], state.selectedJob.sampleName);
+  });
+
+  document.getElementById("btn-retry-job")?.addEventListener("click", async () => {
+    if (state.selectedJob.isDemo) return;
+    try {
+      const started = await apiFetch<{ job: WgsJob }>(
+        `/api/jobs/${state.selectedJob.id}/start`,
+        { method: "POST" }
+      );
+      state.selectedJob = started.job;
+      await refreshJobs(false);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to retry cloud trigger");
+    }
   });
 
   document.getElementById("btn-delete-job")?.addEventListener("click", async () => {

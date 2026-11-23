@@ -107,6 +107,7 @@ export default async (req: Request, context: Context) => {
     SET status = ${"queued"},
         current_stage = ${"Queued on GitHub Actions (16 GB RAM Linux runner)"},
         progress = ${12},
+        error_message = NULL,
         gh_run_url = ${ghActionsUrl},
         stage_logs = ${JSON.stringify(nextLogs)}::jsonb,
         updated_at = NOW()
